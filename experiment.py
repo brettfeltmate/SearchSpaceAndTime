@@ -4,202 +4,278 @@ __author__ = "Brett Feltmate"
 
 import klibs
 from klibs import P
-from klibs.KLConstants import STROKE_INNER, TK_S, NA, RC_COLORSELECT, RC_KEYPRESS
+from klibs.KLConstants import STROKE_CENTER, TK_S, NA, RC_KEYPRESS, RECT_BOUNDARY
 from klibs.KLUtilities import *
 from klibs.KLKeyMap import KeyMap
 from klibs.KLUserInterface import any_key, ui_request
 from klibs.KLGraphics import fill, blit, flip, clear
 from klibs.KLGraphics.KLDraw import *
 from klibs.KLGraphics.colorspaces import const_lum as colors
-from klibs.KLResponseCollectors import ResponseCollector
+from klibs.KLResponseCollectors import *
 from klibs.KLEventInterface import TrialEventTicket as ET
 from klibs.KLCommunication import message
 from klibs.KLExceptions import TrialException
-from klibs.KLTime import Stopwatch
+from klibs.KLTime import Stopwatch, CountDown, precise_time
 
 # Import required external libraries
 import sdl2
 import time
 import random
 import math
-import aggdraw # For drawing mask cells in a single texture
-import numpy as np
-from PIL import Image
+
 
 # Define some useful constants
 SPACE = "space"
 TIME = "time"
 HOMO = "homo"
 HETERO = "hetero"
+COLOR = "color"
+LINE = "line"
 BLACK = (0,0,0,255)
 WHITE = (255,255,255,255)
 
 class SearchSpaceAndTime(klibs.Experiment):
-	'''
-	Spatial & temporal search paradigm
-	2x2 design; varying distractor-distractor & target-distractor similarity
-	Regardless of task, present target item to be found at beginning (block? trial?)
-
-	Spatial search:
-	Present arrays containing distractors & target, have Ss press a button once located
-		RT: Time between presentation of array & response 
-
-	Temporal search:
-	Present RSVP stream containing distractors & target, have Ss press a button when they see the target
-		RT: Time between presentation of target & response
-
-	Varying d-d similarity:
-		sample colours from wheel slices, the width of which determines their similarity
-	
-	Varying t-d similarity:
-		When dissimilar, sample from region outside of distractor slice
-		When similar, sample from within distractor slice
-	'''
 
 	def setup(self):
 		# Stimulus sizes
 		fix_thickness = deg_to_px(0.1)
 		fix_size = deg_to_px(0.6)
-		target_size = deg_to_px(2)
+		self.item_size = deg_to_px(1)
+		self.item_thickness = deg_to_px(.1)
 
 		# Initilize drawbjects
-		self.target = Rectangle(width=target_size)
+		self.fixation = FixationCross(fix_size, fix_thickness, fill=WHITE)
+		
+		self.spatial_rc = ResponseCollector(uses=[CursorResponse])
+		self.temporal_rc = ResponseCollector(uses=[MouseButtonResponse], flip_screen=True)
+		
 
-		self.search_rc = ResponseCollector(uses=RC_KEYPRESS)
-		self.search_keymap = KeyMap(
-			'target_found',
-			['Space'],
-			['target_found'],
-			[sdl2.SDLK_SPACE]
-		)
+		self.stimulus_type = LINE
+		self.search_type  = TIME
+
+		self.item_duration = .1 # seconds
+		self.isi = .05  # seconds
+		self.rsvp_stream = []
+		self.temporal_presentation_times = [] # populated at trial time and reset in trial_cleanup
+		self.temporal_responses = []		  # populated at trial time and reset in trial_cleanup
 
 	def block(self):
-		# Two block types: Spatial & temporal search
-		# If constant w/n a block, determine target & distractor colouring here
-		pass
+		self.cell_count = 64
+		self.target_distractor = HETERO
+		self.distractor_distractor = HETERO
+
+		self.create_stimuli(self.stimulus_type)
+		
 
 	def setup_response_collector(self):
-		self.search_rc.terminate_after = [60,TK_S]
-		self.search_rc.keypress_listener.key_map = self.search_keymap
-		self.search_rc.keypress_listener.interrupts = True
+		self.spatial_rc.terminate_after = [10, TK_S]
+		self.spatial_rc.cursor_listener.interrupts = True 
+		#self.spatial_rc.display_refresh = self.present_array()
+
+		self.temporal_rc.terminate_after = [99999, TK_S]
+		# self.temporal_rc.mousebutton_listener.key_map = self.temporal_keymap #probably trash, was just used in debugging, kept around in case the 
+		self.temporal_rc.mousebutton_listener.interrupts = False 
+		self.temporal_rc.mousebutton_listener.max_response_count = 999
+		self.temporal_rc.display_callback = self.present_stream
 
 	def trial_prep(self):
-		# Generate wheel to select colors from
-		self.color_selector = ColorWheel(deg_to_px(3),rotation=random.randrange(0,360))
-		self.target_angle = random.randrange(0,360)
-		self.target_color = self.color_selector.color_from_angle(self.target_angle)
+		if self.search_type == SPACE:
+			array_radius = deg_to_px(4.5)
+			theta = 360.0 / self.cell_count
 
-		self.target.fill = self.target_color
+			self.item_locs = []
 
-		self.target_distractor = HOMO
-		self.distractor_distractor = HETERO
-		self.cell_count = 64
+			for i in range(1, self.cell_count+1):
+				self.item_locs.append(point_pos(origin=P.screen_c, amplitude=array_radius, angle=0, rotation=theta*i))
 
-		self.item_array = self.generate_array(self.cell_count, self.distractor_distractor, self.target_distractor)
+			random.shuffle(self.item_locs)
+			self.target_loc = self.item_locs.pop()
+
+			self.target_bounds = [
+				point_pos(self.target_loc, amplitude=self.item_size/2, angle=0, rotation=135),
+				point_pos(self.target_loc, amplitude=self.item_size/2, angle=0, rotation=315)
+			]
 		
-		self.evm.register_ticket(ET("array_on", 1000))
+			self.spatial_rc.cursor_listener.add_boundary('target_boundary', self.target_bounds, RECT_BOUNDARY)
+		else:
+			self.rsvp_stream = self.prepare_stream()
+			self.rsvp_stream.reverse() # items are extracted via pop() in present_stream() 
+
+
+		events = [[1000, 'present_target']]
+		events.append([events[-1][0] + 1000, 'present_fixation'])
+		events.append([events[-1][0] + 1000, 'search_onset'])
+		
+		for e in events:
+			self.evm.register_ticket(ET(e[1], e[0]))
 
 		hide_mouse_cursor()
 		self.present_target()
 
-	def trial(self):
+
+	def trial(self):					
 		# Wait 1s before presenting array
-		while self.evm.before("array_on", True):
+		while self.evm.before("present_fixation", True):
+			ui_request()
+
+		self.present_fixation()
+
+		while self.evm.before("search_onset", True):
 			ui_request()
 		
-		# Present array
-		fill()
-		blit(self.item_array, registration=5, location=P.screen_c)
-		flip()
 
-		# Start timing from presentation of array
-		self.search_rc.collect()
+		if self.search_type == SPACE:
+			self.present_array()
+			self.spatial_rc.collect()
 
-		if len(self.search_rc.keypress_listener.responses):
-			trial_rt = self.search_rc.keypress_listener.response(value=False,rt=True)
+
+			if len(self.spatial_rc.cursor_listener.responses):
+				spatial_located, spatial_rt = self.spatial_rc.cursor_listener.response()
+			else:
+				spatial_located = 'miss'
+				spatial_rt = 'NA'
 		else:
-			trial_rt = 'NA'
+			try:
+				# the display callback "present_stream()" pops an element each pass; when all targets have been shown this bad boy throws an error
+				self.temporal_rc.collect()
+			except IndexError:
+				self.temporal_responses = self.temporal_rc.mousebutton_listener.responses
 
 		
-		return {
+		trial_data = {
 			"block_num": P.block_number,
 			"trial_num": P.trial_number,
 			"search_type": "Spatial",
 			"cell_count": self.cell_count,
 			"target_distractor": self.target_distractor,
 			"distractor_distractor": self.distractor_distractor,
-			"trial_rt": trial_rt,
-			"slice_lower_bound": self.slice_bounds[0] % 360,
-			"slice_upper_bound": self.slice_bounds[1] % 360
 		}
+		for tpt in self.temporal_presentation_times:
+			onset_key = 't{0}_onset'.format(self.temporal_presentation_times.index(tpt)+1)
+			onset_val = tpt[0]
+			dist_count_key = 't{0}_distractor_count'.format(self.temporal_presentation_times.index(tpt)+1)
+			dist_count_val = tpt[1]
+			trial_data[onset_key] = onset_val
+			trial_data[dist_count_key] = dist_count_val
+		return trial_data
 		clear()
 
 	def trial_clean_up(self):
-		self.search_rc.keypress_listener.reset()
+		self.spatial_rc.cursor_listener.reset()
+		self.temporal_rc.mousebutton_listener.reset()
+		
+		# log responses to database
+		for tr in self.temporal_responses:
+			self.database.insert({
+				'trial_num': P.trial_number,
+				'rt': tr.rt,
+				'target_loc': NA
+			}, 'responses')
+
+		
+		self.temporal_responses = []
+		self.temporal_presentation_times = []
+
 
 	def clean_up(self):
 		pass
 
 	def present_target(self):
+		msg = "This is your target!"
+		msg_loc = [P.screen_c[0], (P.screen_c[1] - deg_to_px(2))]
+
 		fill()
-		blit(self.target, location=P.screen_c, registration=5)
+		message(msg, location=msg_loc, registration=5)
+		blit(self.target_item, location=P.screen_c, registration=5)
 		flip()
 
-	def generate_array(self, cell_count, distractor_distractor, target_distractor):
-		# Randomly determine target's position within the array
-		target_pos = [random.randint(0,7), random.randint(0,7)]
-		# Determine wheel sections to sample colours from
-		slice_width = 45 if distractor_distractor == HOMO else 90
+	def present_fixation(self):
+		fill()
+		blit(self.fixation, location=P.screen_c, registration=5)
+		flip()
 
-		target_lower_padded = self.target_angle - 20
-		target_upper_padded = self.target_angle + 20
+	def create_stimuli(self, stimulus_type):
+		if stimulus_type == COLOR:
+		# Generate wheel to select colors from
+			self.color_selector = ColorWheel(deg_to_px(1),rotation=random.randrange(0,360))
+			
+			# Select target colouring
+			self.target_color = self.color_selector.color_from_angle(0)
+			self.target_item = Rectangle(width=self.item_size, fill=self.target_color)
 
-		if target_distractor == HOMO:
-			self.slice_bounds = [target_lower_padded-slice_width, 
-								 target_upper_padded+slice_width]
+			# Select distractor colourings
+			ref_angle = 20 if self.target_distractor == HOMO else 150
+			bound = 1 if self.distractor_distractor == HOMO else 4
+
+			self.distractor_fills = []
+			for i in range(0,bound):
+				self.distractor_fills.append(self.color_selector.color_from_angle( ref_angle+(20*i) ))
+
+			# Now that we have our colouring, create stimuli
+			
+			self.distractors = []
+			for f in self.distractor_fills:
+				self.distractors.append(Rectangle(width=self.item_size, fill=f))
 		else:
-			self.slice_bounds = [target_lower_padded+slice_width, 
-								 target_upper_padded + slice_width*2]
 
-		# Set array size
-		array_size = deg_to_px(9)
-		# Set cell size
-		cell_size = array_size / (math.sqrt(cell_count)) # Array comprised of 64 cells arranged 8x8
-		# Black outline around cells
-		cell_outline_width = deg_to_px(.1)
-		black_pen = aggdraw.Pen((0,0,0),cell_outline_width)
-		# Initialize array for cells to be applied to
-		canvas = Image.new('RGBA', [array_size,array_size], (0,0,0,0))
-		array = aggdraw.Draw(canvas)
+			self.target_item = Rectangle(self.item_size, self.item_thickness, fill=BLACK, rotation=45)
 
-		# Generate cells
-		for row in range(0,8):
-			for col in range(0,8):
-				# Determine coordinates of cell
-				top_left = (row*cell_size, col*cell_size)
-				bottom_right = ((row+1)*cell_size, (col+1)*cell_size)
+			ref_angle = 45 if self.target_distractor == HOMO else 135
+			bound = 1 if self.distractor_distractor == HOMO else 4
 
-				# Check if this is where the target should go
-				if (row, col) == (target_pos[0],target_pos[1]):
-					color_brush = aggdraw.Brush(tuple(self.target_color[:3]))
-					# Create cell
-					array.rectangle(
-						(top_left[0], top_left[1], bottom_right[0], bottom_right[1]),
-						black_pen,
-						color_brush
-					)
-				else:
-					cell_angle = random.randrange(self.slice_bounds[0], self.slice_bounds[1])
-					cell_color = self.color_selector.color_from_angle(cell_angle)
+			self.distractor_tilts = []
+			for i in range(0, bound):
+				self.distractor_tilts.append(ref_angle + (i * 5))
 
-					color_brush = aggdraw.Brush(tuple(cell_color[:3]))
-					array.rectangle(
-						(top_left[0], top_left[1], bottom_right[0], bottom_right[1]),
-						black_pen,
-						color_brush
-					)
-		# Apply cells to array
-		array.flush()
-		return np.asarray(canvas)
+			self.distractors = []
+			for t in self.distractor_tilts:
+				self.distractors.append(Rectangle(self.item_size, self.item_thickness, fill=BLACK, rotation=t))
 
+	def present_array(self):
 
+		fill()
+		self.bounds = Rectangle(width=self.item_size, stroke=[self.item_thickness, WHITE, STROKE_INNER])
+		blit(self.target_item, registration=5, location=self.target_loc)
+		blit(self.bounds, registration=5, location=self.target_loc)
+		blit(self.fixation, registration=5, location=P.screen_c)
+		for loc in self.item_locs:
+			blit(random.choice(self.distractors), registration=5, location=loc)
+		flip()
+		show_mouse_cursor()
+		mouse_pos(position=P.screen_c)
+
+	def prepare_stream(self):
+		target_counter = 0
+		stream_items = []
+
+		while not target_counter == 15:
+			distractor_count = random.randint(5,10)
+			for i in range(distractor_count):
+				stream_items.append([random.choice(self.distractors), False, None])
+			stream_items.append([self.target_item, True, distractor_count])
+			target_counter += 1
+
+		return stream_items
+	
+
+	def present_stream(self):
+		duration_cd = CountDown(self.item_duration)
+		isi_cd = CountDown(self.isi)
+		item = self.rsvp_stream.pop()
+		fill()
+		blit(item[0], registration=5, location=P.screen_c)
+		flip()
+
+		duration_cd.reset()
+		while duration_cd.counting():
+			pass
+		
+		fill()
+
+		if item[1]:
+			self.temporal_presentation_times.append([self.evm.trial_time_ms, item[2]])
+		isi_cd.reset()
+		while isi_cd.counting():
+			pass
+
+	
