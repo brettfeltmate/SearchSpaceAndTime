@@ -38,29 +38,31 @@ class SearchSpaceAndTime(klibs.Experiment):
 
 	def setup(self):
 		# Stimulus sizes
-		fix_thickness = deg_to_px(0.1)
-		fix_size = deg_to_px(0.6)
-		self.item_size = deg_to_px(1)
+		fix_size            = deg_to_px(0.6)
+		fix_thickness       = deg_to_px(0.1)
+		self.item_size      = deg_to_px(0.8)
 		self.item_thickness = deg_to_px(.1)
 
 		# Initilize drawbjects
 		self.fixation = FixationCross(fix_size, fix_thickness, fill=WHITE)
 		
-		self.spatial_rc = ResponseCollector(uses=[CursorResponse])
+		# Initialize ResponseCollectors
+		self.spatial_rc  = ResponseCollector(uses=[CursorResponse])
 		self.temporal_rc = ResponseCollector(uses=[MouseButtonResponse], flip_screen=True)
 		
-
-		self.stimulus_type = LINE
-		self.search_type  = TIME
+		# Initialize task factors
+		self.stimulus_type = COLOR
+		self.search_type   = TIME
 
 		self.item_duration = .1 # seconds
-		self.isi = .05  # seconds
+		self.isi = .05  		# seconds
 		self.rsvp_stream = []
-		self.temporal_presentation_times = [] # populated at trial time and reset in trial_cleanup
 		self.temporal_responses = []		  # populated at trial time and reset in trial_cleanup
+		self.temporal_presentation_times = [] # populated at trial time and reset in trial_cleanup
+		
 
 	def block(self):
-		self.cell_count = 64
+		self.cell_count = 36
 		self.target_distractor = HETERO
 		self.distractor_distractor = HETERO
 
@@ -70,23 +72,21 @@ class SearchSpaceAndTime(klibs.Experiment):
 	def setup_response_collector(self):
 		self.spatial_rc.terminate_after = [10, TK_S]
 		self.spatial_rc.cursor_listener.interrupts = True 
-		#self.spatial_rc.display_refresh = self.present_array()
 
 		self.temporal_rc.terminate_after = [99999, TK_S]
-		# self.temporal_rc.mousebutton_listener.key_map = self.temporal_keymap #probably trash, was just used in debugging, kept around in case the 
 		self.temporal_rc.mousebutton_listener.interrupts = False 
 		self.temporal_rc.mousebutton_listener.max_response_count = 999
 		self.temporal_rc.display_callback = self.present_stream
 
 	def trial_prep(self):
 		if self.search_type == SPACE:
-			array_radius = deg_to_px(4.5)
+			array_radius = deg_to_px(6)
 			theta = 360.0 / self.cell_count
 
 			self.item_locs = []
 
-			for i in range(1, self.cell_count+1):
-				self.item_locs.append(point_pos(origin=P.screen_c, amplitude=array_radius, angle=0, rotation=theta*i))
+			for i in range(0, self.cell_count):
+				self.item_locs.append(point_pos(origin=P.screen_c, amplitude=array_radius, angle=0, rotation=theta*(i+1)))
 
 			random.shuffle(self.item_locs)
 			self.target_loc = self.item_locs.pop()
@@ -141,7 +141,6 @@ class SearchSpaceAndTime(klibs.Experiment):
 			except IndexError:
 				self.temporal_responses = self.temporal_rc.mousebutton_listener.responses
 
-		
 		trial_data = {
 			"block_num": P.block_number,
 			"trial_num": P.trial_number,
@@ -150,13 +149,22 @@ class SearchSpaceAndTime(klibs.Experiment):
 			"target_distractor": self.target_distractor,
 			"distractor_distractor": self.distractor_distractor,
 		}
-		for tpt in self.temporal_presentation_times:
-			onset_key = 't{0}_onset'.format(self.temporal_presentation_times.index(tpt)+1)
-			onset_val = tpt[0]
-			dist_count_key = 't{0}_distractor_count'.format(self.temporal_presentation_times.index(tpt)+1)
-			dist_count_val = tpt[1]
-			trial_data[onset_key] = onset_val
-			trial_data[dist_count_key] = dist_count_val
+		if self.search_type == TIME:
+			for tpt in self.temporal_presentation_times:
+				onset_key = 't{0}_onset'.format(self.temporal_presentation_times.index(tpt)+1)
+				onset_val = tpt[0]
+				dist_count_key = 't{0}_distractor_count'.format(self.temporal_presentation_times.index(tpt)+1)
+				dist_count_val = tpt[1]
+				trial_data[onset_key] = onset_val
+				trial_data[dist_count_key] = dist_count_val
+		else:
+			for i in range(0,15):
+				onset_key = 't{0}_onset'.format(i+1)
+				onset_val = 'NA'
+				dist_count_key = 't{0}_distractor_count'.format(i+1)
+				dist_count_val = 'NA'
+				trial_data[onset_key] = onset_val
+				trial_data[dist_count_key] = dist_count_val
 		return trial_data
 		clear()
 
@@ -196,26 +204,31 @@ class SearchSpaceAndTime(klibs.Experiment):
 
 	def create_stimuli(self, stimulus_type):
 		if stimulus_type == COLOR:
-		# Generate wheel to select colors from
+			# Generate wheel to select colors from
 			self.color_selector = ColorWheel(deg_to_px(1),rotation=random.randrange(0,360))
 			
 			# Select target colouring
 			self.target_color = self.color_selector.color_from_angle(0)
-			self.target_item = Rectangle(width=self.item_size, fill=self.target_color)
+			self.target_item = Rectangle(width=self.item_size, fill=self.target_color, stroke=[self.item_thickness, BLACK, STROKE_INNER])
 
 			# Select distractor colourings
-			ref_angle = 20 if self.target_distractor == HOMO else 150
-			bound = 1 if self.distractor_distractor == HOMO else 4
+			ref_angle = 0 if self.target_distractor == HOMO else 180
+
 
 			self.distractor_fills = []
-			for i in range(0,bound):
-				self.distractor_fills.append(self.color_selector.color_from_angle( ref_angle+(20*i) ))
+			if self.distractor_distractor == HOMO:
+				pad = random.choice([-20,20])
+				self.distractor_fills.append(self.color_selector.color_from_angle(ref_angle + pad))
+			else:
+				for i in range(1,3):
+					self.distractor_fills.append(self.color_selector.color_from_angle(ref_angle + (20*i)))
+					self.distractor_fills.append(self.color_selector.color_from_angle(ref_angle - (20*i)))
 
 			# Now that we have our colouring, create stimuli
 			
 			self.distractors = []
 			for f in self.distractor_fills:
-				self.distractors.append(Rectangle(width=self.item_size, fill=f))
+				self.distractors.append(Rectangle(width=self.item_size, fill=f, stroke=[self.item_thickness, BLACK, STROKE_INNER]))
 		else:
 
 			self.target_item = Rectangle(self.item_size, self.item_thickness, fill=BLACK, rotation=45)
@@ -234,9 +247,7 @@ class SearchSpaceAndTime(klibs.Experiment):
 	def present_array(self):
 
 		fill()
-		self.bounds = Rectangle(width=self.item_size, stroke=[self.item_thickness, WHITE, STROKE_INNER])
 		blit(self.target_item, registration=5, location=self.target_loc)
-		blit(self.bounds, registration=5, location=self.target_loc)
 		blit(self.fixation, registration=5, location=P.screen_c)
 		for loc in self.item_locs:
 			blit(random.choice(self.distractors), registration=5, location=loc)
